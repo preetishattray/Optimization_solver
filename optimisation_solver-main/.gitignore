@@ -1,0 +1,46 @@
+
+# Build directories
+build/
+build*/
+**/build/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# macOS
+.DS_Store
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Compiled binaries / libraries
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Benchmark instance data.
+#
+# Downloaded from Netlib and MIPLIB and fully reproducible with
+# benchmarks/fetch_netlib.py and benchmarks/fetch_miplib.py, which verify every
+# file against the SHA-256 recorded in the committed manifests. About 5 MB of
+# regenerable input does not belong in the history; the manifests, the frozen
+# selections and the provenance notes -- which are what make a result row
+# traceable -- are committed.
+benchmarks/instances/*/raw/
+benchmarks/instances/*/mps/
+benchmarks/instances/*/tools/
+benchmarks/instances/netlib/netlib_readme.txt
+__pycache__/
+*.pyc
+
+# Dropped in the working directory by the HiGHS binary on every run.
+Highs.log

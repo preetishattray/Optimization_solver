@@ -1,0 +1,534 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(Optimisation_solver)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_executable(bench
+    src/main.cpp
+    src/model/model.cpp
+    src/benchmark/benchmarkresult.cpp
+    src/presolve/presolver.cpp
+)
+
+target_include_directories(bench PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+
+# ---------------------------------------------------------------------------
+# assert() and Release builds
+#
+# CMake gives every Release build -DNDEBUG, which compiles assert() out. Many
+# test files here use assert() as their ONLY check, so under Release they ran
+# their setup, verified nothing, and reported success unconditionally -- a green
+# ctest run in Release was not evidence those assertions held. Undefining NDEBUG
+# for TEST targets only (never the libraries under test, which stay optimised)
+# makes their assertions fire in every build type.
+# ---------------------------------------------------------------------------
+function(optimsolver_enable_assertions target)
+    if(TARGET ${target})
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${target} PRIVATE -UNDEBUG)
+        endif()
+    endif()
+endfunction()
+
+enable_testing()
+
+option(OPTIMSOLVER_REQUIRE_CUDA_TEST_DEVICE "Fail CUDA validation if no usable GPU is present" OFF)
+add_executable(test_batch2
+    tests/presolve/test_batch2.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_batch2 PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+add_test(NAME PresolveBatch2 COMMAND test_batch2)
+
+add_executable(test_presolve_correctness
+    tests/presolve/test_presolve_correctness.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_presolve_correctness PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+add_test(NAME PresolveCorrectness COMMAND test_presolve_correctness)
+
+add_executable(test_transformation_metadata
+    tests/presolve/test_transformation_metadata.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_transformation_metadata PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+add_test(NAME PresolveTransformationMetadata COMMAND test_transformation_metadata)
+
+add_executable(test_pipeline_cascades
+    tests/presolve/test_pipeline_cascades.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_pipeline_cascades PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+add_test(NAME PresolvePipelineCascades COMMAND test_pipeline_cascades)
+
+add_executable(test_adversarial
+    tests/presolve/test_adversarial.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_adversarial PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+add_test(NAME PresolveAdversarial COMMAND test_adversarial)
+
+# Postsolve: reconstructs the original-model solution from the
+# PresolveResult/PostsolveMetadata produced above.
+add_library(postsolver
+    src/postsolve/postsolver.cpp
+)
+target_include_directories(postsolver PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(postsolver PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(postsolver PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(test_postsolve
+    tests/postsolve/test_postsolver.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_postsolve PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(test_postsolve PRIVATE postsolver)
+add_test(NAME PostsolveTests COMMAND test_postsolve)
+
+# Exercise reconstruction directly, without wiring duals into the pipeline.
+add_executable(test_postsolve_duals
+    tests/postsolve/test_dual_reconstruction.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_postsolve_duals PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(test_postsolve_duals PRIVATE postsolver)
+foreach(case IN ITEMS
+    known_shadow_price derived_bound singleton_lower singleton_upper
+    singleton_equality singleton_ranged inactive_singleton reduced_costs
+    equality_dual lower_dual upper_dual fixed_variable empty_duals
+    wrong_dual_size invalid_constraint_mapping residual_gate nonfinite_duals nonfinite_reconstruction
+    quadratic_gradient quadratic_reconstruction primal_only missing_bound_provenance
+    invalid_bound_indices invalid_bound_direction invalid_source_coefficient
+    invalid_singleton_provenance provenance_after_elimination provenance_bound_history
+    derived_bound_directions)
+    add_test(NAME PostsolveDual_${case} COMMAND test_postsolve_duals ${case})
+endforeach()
+
+add_executable(test_presolve_metadata
+    tests/postsolve/test_presolve_metadata.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(test_presolve_metadata PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/tests/postsolve
+)
+target_link_libraries(test_presolve_metadata PRIVATE postsolver)
+add_test(NAME test_presolve_metadata COMMAND test_presolve_metadata)
+
+# Optional CUDA backends for the PDLP and QP engines (see docs/cuda.md). OFF by
+# default: a normal configure needs no CUDA toolkit, driver or GPU, and compiles
+# no CUDA source. When ON, the language is enabled here, above the engines,
+# because their device code reaches every target that links them.
+option(OPTIMSOLVER_ENABLE_CUDA "Build the CUDA backends of the PDLP and QP engines" OFF)
+if(OPTIMSOLVER_ENABLE_CUDA)
+    include(${PROJECT_SOURCE_DIR}/cmake/OptimsolverCuda.cmake)
+    optimsolver_enable_cuda()
+endif()
+
+# Engine unit tests are part of the root test suite by default.
+option(PDLP_BUILD_TESTS "Build the PDLP test suite" ON)
+option(QP_BUILD_TESTS "Build the QP test suite" ON)
+add_subdirectory(pdlp_engine)
+
+# Branch-and-cut over a dual simplex, and ADMM for convex QP. Both build their
+# own tests, so `ctest` from the root covers all three engines.
+add_subdirectory(milp_engine)
+add_subdirectory(qp_engine)
+if(OPTIMSOLVER_REQUIRE_CUDA_TEST_DEVICE AND NOT (PDLP_ENABLE_CUDA OR QP_ENABLE_CUDA))
+    message(FATAL_ERROR "Strict CUDA validation requires a CUDA backend to be enabled")
+endif()
+add_subdirectory(miqp_engine)
+add_subdirectory(nlp_engine)
+add_subdirectory(barrier_engine)
+
+# Classifier and dispatcher. Classification runs before presolve (its reductions
+# differ by problem class); engine selection runs after (presolve changes size,
+# can eliminate all integrality, and can prove infeasibility outright).
+add_library(solver_dispatch
+    src/solver/classifier.cpp
+    src/solver/dispatcher.cpp
+    src/model/model.cpp
+    src/presolve/presolver.cpp
+)
+target_include_directories(solver_dispatch PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(solver_dispatch PUBLIC qp_engine)
+target_compile_features(solver_dispatch PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(solver_dispatch PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+enable_testing()
+add_executable(test_classifier_dispatcher tests/solver/test_classifier_dispatcher.cpp)
+target_link_libraries(test_classifier_dispatcher PRIVATE solver_dispatch)
+add_test(NAME test_classifier_dispatcher COMMAND test_classifier_dispatcher)
+
+# The only place model::Model and pdlp::CompiledLp meet. Links pdlp_engine for
+# CompiledLp and PdlpResult; everything else in the pipeline speaks model::Model.
+add_library(pdlp_adapter
+    src/adapter/pdlp_adapter.cpp
+    src/model/model.cpp
+)
+target_include_directories(pdlp_adapter PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(pdlp_adapter PUBLIC pdlp_engine)
+target_compile_features(pdlp_adapter PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(pdlp_adapter PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(test_pdlp_adapter tests/adapter/test_pdlp_adapter.cpp)
+target_link_libraries(test_pdlp_adapter PRIVATE pdlp_adapter)
+add_test(NAME test_pdlp_adapter COMMAND test_pdlp_adapter)
+
+# The orchestrator is the one entry point a caller needs: it classifies, runs
+# presolve, dispatches to whichever engine the decision names, and normalises
+# every engine's result into a single SolveResult. It is therefore the only
+# target that links all three engines at once.
+add_library(solver_orchestrator
+    src/solver/orchestrator.cpp
+    src/solver/crossover.cpp
+    src/solver/nlp.cpp
+)
+target_include_directories(solver_orchestrator PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(solver_orchestrator PUBLIC
+    solver_dispatch
+    pdlp_adapter
+    milp_engine
+    qp_engine
+    miqp_engine
+    nlp_engine
+    barrier_engine
+    postsolver
+)
+target_compile_features(solver_orchestrator PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(solver_orchestrator PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Parser for mathematical programming system (.mps) input format.
+add_library(mps_reader
+    src/mps/mps_reader.cpp
+)
+target_include_directories(mps_reader PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(mps_reader PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(mps_reader PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# MPS parser suite. Fixtures are referenced by paths relative to the project
+# source directory, so the test runs from there rather than from the build tree.
+# model.cpp comes in directly: the mps_reader library deliberately does not
+# carry it (it only produces a Model, never validates one), but the test asserts
+# that a parsed model passes Model::validate().
+add_executable(test_mps_reader
+    tests/mps/mps_reader_tests.cpp
+    src/model/model.cpp
+)
+target_link_libraries(test_mps_reader PRIVATE mps_reader)
+add_test(NAME test_mps_reader
+    COMMAND test_mps_reader
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+)
+
+# End-to-end: model in, solution out, through every layer in the real order.
+add_executable(test_end_to_end tests/pipeline/test_end_to_end.cpp)
+target_link_libraries(test_end_to_end PRIVATE solver_orchestrator)
+add_test(NAME test_end_to_end COMMAND test_end_to_end)
+
+add_executable(test_mps_miqp tests/pipeline/test_mps_miqp.cpp)
+target_link_libraries(test_mps_miqp PRIVATE solver_orchestrator mps_reader)
+add_test(NAME test_mps_miqp
+    COMMAND test_mps_miqp
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+)
+
+add_executable(test_postsolve_integration tests/pipeline/test_postsolve_integration.cpp)
+target_link_libraries(test_postsolve_integration PRIVATE solver_orchestrator)
+foreach(case IN ITEMS lp_engines qp_signs all_eliminated bound_only integer_models
+    unavailable_duals failure_statuses limit_no_solution limit_feasible_solution reduced_api)
+    add_test(NAME PostsolveIntegration_${case} COMMAND test_postsolve_integration ${case})
+endforeach()
+
+# Pins the Model quadratic convention through the public solve API: a
+# diagonal q_ii must reach the engine as P_ii = 2*q_ii and an off-diagonal
+# q_ij as P_ij = P_ji = q_ij, with maximization negating both P and q and the
+# objective offset restored exactly once. Every expected value is derived by
+# hand in the test, independently of the code under test.
+add_executable(test_qp_convention tests/qp/test_qp_convention.cpp)
+target_link_libraries(test_qp_convention PRIVATE solver_orchestrator)
+add_test(NAME test_qp_convention COMMAND test_qp_convention)
+
+# Backend selection through the public pipeline: the request reaches the
+# engine, the engine records what ran, and an explicit CUDA request is never
+# answered by a silent CPU solve.
+add_executable(test_compute_backend tests/solver/test_compute_backend.cpp)
+target_link_libraries(test_compute_backend PRIVATE solver_orchestrator)
+add_test(NAME test_compute_backend COMMAND test_compute_backend)
+
+# SolveReport: the optional observability record of a solve. Checks that it is
+# filled from the same run as the SolveResult and never changes the answer.
+add_executable(test_solve_report tests/solver/test_solve_report.cpp)
+target_link_libraries(test_solve_report PRIVATE solver_orchestrator)
+add_test(NAME test_solve_report COMMAND test_solve_report)
+
+# The solve-record contract, used the way an external consumer (such as KAIRO
+# Desktop) would: solver::solve(model, options, &report), then the solve.v1 writer.
+# Deliberately links no CLI target -- a consumer needs neither the terminal
+# application nor its text output.
+add_executable(test_solve_contract tests/api/test_solve_contract.cpp)
+target_link_libraries(test_solve_contract PRIVATE solve_report_json)
+add_test(NAME test_solve_contract COMMAND test_solve_contract)
+
+# Ground truth by exhaustive enumeration: every small binary MILP is solved
+# by brute force over all 2^n subsets and compared against the pipeline. No
+# reference solver required, so this stays runnable anywhere.
+add_executable(test_milp_enumeration tests/milp/test_milp_enumeration.cpp)
+target_link_libraries(test_milp_enumeration PRIVATE solver_orchestrator)
+add_test(NAME test_milp_enumeration COMMAND test_milp_enumeration)
+
+# The optimsolver.solve.v1 / optimsolver.nlp.v1 record writer: a pure mapping
+# from (request echo, SolveResult, SolveReport) to JSON. Its own target so any
+# consumer of solver runs -- the CLI and KAIRO Desktop -- can produce
+# or test the serialized contract without linking the terminal application.
+# It runs no solver stage; it only reads what solver::solve() returned.
+add_library(solve_report_json
+    cli/json_report.cpp
+    cli/nlp_json_report.cpp
+)
+target_include_directories(solve_report_json PUBLIC
+    ${PROJECT_SOURCE_DIR}/cli
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(solve_report_json PUBLIC solver_orchestrator postsolver)
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    OUTPUT_VARIABLE OPTIMSOLVER_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT OPTIMSOLVER_GIT_COMMIT)
+    set(OPTIMSOLVER_GIT_COMMIT "unknown")
+endif()
+target_compile_definitions(solve_report_json PRIVATE
+    OPTIMSOLVER_GIT_COMMIT="${OPTIMSOLVER_GIT_COMMIT}"
+    OPTIMSOLVER_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+)
+target_compile_features(solve_report_json PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(solve_report_json PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Command-line interface application layer
+add_library(optimsolver_cli
+    cli/nlp_cli.cpp
+    cli/argument_parser.cpp
+    cli/cli.cpp
+    cli/mascot.cpp
+    cli/report_view.cpp
+)
+target_include_directories(optimsolver_cli PUBLIC
+    ${PROJECT_SOURCE_DIR}/cli
+    ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(optimsolver_cli PUBLIC
+    solve_report_json
+    solver_orchestrator
+    mps_reader
+    postsolver
+)
+target_compile_features(optimsolver_cli PUBLIC cxx_std_17)
+if(NOT MSVC)
+    target_compile_options(optimsolver_cli PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(optimsolver
+    cli/main.cpp
+)
+target_link_libraries(optimsolver PRIVATE optimsolver_cli)
+install(TARGETS optimsolver RUNTIME DESTINATION bin)
+
+add_executable(test_cli
+    tests/cli/test_cli.cpp
+)
+target_link_libraries(test_cli PRIVATE optimsolver_cli)
+target_compile_definitions(test_cli PRIVATE
+    OPTIMSOLVER_BIN_PATH="$<TARGET_FILE:optimsolver>"
+    TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+add_test(NAME test_cli COMMAND test_cli)
+
+# ---------------------------------------------------------------------------
+# Benchmark harness. POSIX only (see benchmarks/harness/process_manager.h), so
+# it is guarded rather than failing to build on Windows. It is the promoted form
+# of benchmark_model/benchmarkcode.cpp, which no target ever referenced.
+# ---------------------------------------------------------------------------
+if(NOT WIN32)
+    add_library(bench_harness benchmarks/harness/process_manager.cpp)
+    target_include_directories(bench_harness PUBLIC
+        ${PROJECT_SOURCE_DIR}/benchmarks/harness
+        ${PROJECT_SOURCE_DIR}/include
+    )
+    target_compile_features(bench_harness PUBLIC cxx_std_17)
+    if(NOT MSVC)
+        target_compile_options(bench_harness PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_executable(bench_runner benchmarks/harness/bench_runner.cpp)
+    target_link_libraries(bench_runner PRIVATE bench_harness)
+
+    add_executable(test_process_manager benchmarks/harness/test_process_manager.cpp)
+    target_link_libraries(test_process_manager PRIVATE bench_harness)
+    add_test(NAME test_process_manager COMMAND test_process_manager)
+
+    # Proves the checker REJECTS wrong answers. A checker that never fails would
+    # make every benchmark run look green.
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_benchmark_pipeline
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/benchmarks/test_pipeline.py
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        )
+        set_tests_properties(test_benchmark_pipeline PROPERTIES
+            TIMEOUT 300
+            ENVIRONMENT "OPTIMSOLVER_BINARY=$<TARGET_FILE:optimsolver>")
+    endif()
+endif()
+
+# Applied last so every test target, including those in engine subdirectories,
+# already exists.
+foreach(optimsolver_test_target IN ITEMS
+    bench test_batch2 test_presolve_correctness test_transformation_metadata
+    test_pipeline_cascades test_adversarial test_postsolve test_postsolve_duals
+    test_presolve_metadata test_classifier_dispatcher test_pdlp_adapter
+    test_mps_reader test_end_to_end test_qp_convention test_milp_enumeration
+    test_postsolve_integration test_cli test_process_manager
+    test_dual_simplex test_branch_and_bound test_gomory_cuts test_heuristics
+    test_branching pdlp_tests qp_tests)
+    optimsolver_enable_assertions(${optimsolver_test_target})
+endforeach()
+
+# NLP input/CLI contract requires no third-party Python packages.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME nlp_cli COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/nlp_engine/tests/test_cli.py $<TARGET_FILE:optimsolver>)
+    option(NLP_REFERENCE_TESTS "Run optional SciPy SLSQP comparisons" OFF)
+    if(NLP_REFERENCE_TESTS)
+        add_test(NAME nlp_reference COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/nlp_engine/benchmarks/reference.py --binary $<TARGET_FILE:optimsolver>)
+        set_tests_properties(nlp_reference PROPERTIES TIMEOUT 180)
+    endif()
+endif()
+
+add_executable(test_barrier_integration tests/pipeline/test_barrier_integration.cpp)
+target_link_libraries(test_barrier_integration PRIVATE solver_orchestrator)
+add_test(NAME barrier_pipeline COMMAND test_barrier_integration)
+
+add_executable(test_qp_contract tests/pipeline/test_qp_contract.cpp)
+target_link_libraries(test_qp_contract PRIVATE solver_orchestrator)
+add_test(NAME qp_contract COMMAND test_qp_contract)
+
+add_executable(test_nlp_integration tests/pipeline/test_nlp_integration.cpp)
+target_link_libraries(test_nlp_integration PRIVATE solver_orchestrator)
+add_test(NAME nlp_pipeline COMMAND test_nlp_integration)
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME backend_json_provenance COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/cli/test_backend_json.py $<TARGET_FILE:optimsolver>)
+    set_tests_properties(backend_json_provenance PROPERTIES TIMEOUT 180)
+    add_test(NAME solve_report_json COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/cli/test_solve_report_json.py $<TARGET_FILE:optimsolver>)
+    set_tests_properties(solve_report_json PROPERTIES TIMEOUT 180)
+endif()
+
+# KAIRO Desktop (desktop/): native Qt 6 application, in-process client of
+# KAIRO Core. Built when Qt 6 (Widgets, Concurrent) is available; without Qt
+# the solver, CLI and tests build exactly as before.
+option(KAIRO_BUILD_DESKTOP "Build the KAIRO Desktop application (requires Qt 6)" ON)
+if(KAIRO_BUILD_DESKTOP)
+    find_package(Qt6 6.5 COMPONENTS Core Gui Widgets Concurrent QUIET)
+    if(Qt6_FOUND)
+        message(STATUS "KAIRO Desktop: building with Qt ${Qt6_VERSION}")
+        add_subdirectory(desktop)
+    else()
+        message(STATUS "KAIRO Desktop: Qt 6 not found; skipping the desktop application")
+    endif()
+endif()
+
+# Offline benchmark infrastructure tests have no downloaded-data dependency.
+option(QP_REFERENCE_TESTS "Run independent OSQP comparisons (requires numpy/scipy/osqp)" OFF)
+if(QP_REFERENCE_TESTS AND NOT Python3_Interpreter_FOUND)
+    message(FATAL_ERROR "QP_REFERENCE_TESTS requires a Python interpreter")
+endif()
+if(Python3_Interpreter_FOUND)
+    add_test(NAME benchmark_suites COMMAND ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/benchmarks/test_suites.py)
+    if(QP_REFERENCE_TESTS)
+        execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy, scipy, osqp"
+            RESULT_VARIABLE QP_REFERENCE_IMPORT)
+        if(NOT QP_REFERENCE_IMPORT EQUAL 0)
+            message(FATAL_ERROR "QP_REFERENCE_TESTS requires numpy, scipy and osqp")
+        endif()
+        add_executable(qp_reference_cases tools/reference_checks/qp_random_generator.cpp)
+        target_link_libraries(qp_reference_cases PRIVATE solver_orchestrator)
+        add_test(NAME qp_reference COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tools/reference_checks/qp_vs_osqp.py
+            --generator $<TARGET_FILE:qp_reference_cases> --count 300 --seed 20260908)
+        add_test(NAME benchmark_reference_adapters COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/benchmarks/test_reference_adapters.py)
+        set_tests_properties(qp_reference benchmark_reference_adapters PROPERTIES TIMEOUT 240 LABELS reference)
+    endif()
+endif()
+
+# Public corpus tests are opt-in and offline. Missing/corrupt caches are failures,
+# never skips. Fetch the frozen data explicitly with benchmarks/fetch_*.py first.
+option(BENCHMARK_CORPUS_TESTS "Run cached Netlib, MIPLIB, QP and Mittelmann suites" OFF)
+set(BENCHMARK_CASE_SECONDS 10 CACHE STRING "Per solver wall budget for public corpus tests")
+if(BENCHMARK_CORPUS_TESTS)
+    if(NOT Python3_Interpreter_FOUND OR WIN32)
+        message(FATAL_ERROR "BENCHMARK_CORPUS_TESTS requires Python and the POSIX benchmark harness")
+    endif()
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy, scipy, osqp"
+        RESULT_VARIABLE BENCHMARK_REFERENCE_IMPORT)
+    if(NOT BENCHMARK_REFERENCE_IMPORT EQUAL 0)
+        message(FATAL_ERROR "BENCHMARK_CORPUS_TESTS requires numpy, scipy and osqp")
+    endif()
+    foreach(suite IN ITEMS netlib miplib qp mittelmann)
+        add_test(NAME corpus_${suite} COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/benchmarks/run_suites.py --suite ${suite}
+            --binary $<TARGET_FILE:optimsolver> --runner $<TARGET_FILE:bench_runner>
+            --timeout ${BENCHMARK_CASE_SECONDS}
+            --out ${PROJECT_BINARY_DIR}/benchmark-reports/${suite}.json)
+        set_tests_properties(corpus_${suite} PROPERTIES LABELS "benchmark;reference" RUN_SERIAL TRUE)
+    endforeach()
+endif()

@@ -1,0 +1,62 @@
+#pragma once
+
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace cli {
+
+enum class Command {
+    None,
+    Help,
+    Solve,
+    SolveNlp,
+    Interactive
+};
+
+struct SolveOptions {
+    std::string modelPath;
+    std::optional<std::string> solver;
+    std::optional<double> timeLimitSeconds;
+    std::optional<std::string> outputPath;
+    std::optional<std::string> backend;
+    std::optional<int> cudaDevice;
+
+    // Machine-readable outputs for the benchmark harness. Separate from
+    // --output, which stays a human-readable solution listing.
+    std::optional<std::string> jsonPath;
+    std::optional<std::string> dumpModelPath;
+    std::optional<int> threadCount;
+
+    std::optional<double> tolerance;
+    std::optional<int> iterationLimit;
+
+    // Print the full solver execution report (classification, presolve,
+    // dispatch, stage timings, validation) after the normal summary.
+    bool verbose = false;
+    bool help = false;
+};
+
+struct ParseResult {
+    Command command = Command::None;
+    SolveOptions solveOptions;
+    bool success = false;
+    bool isHelp = false;
+    std::string errorMessage;
+    std::string errorTitle;
+    std::string errorDetails;
+};
+
+class ArgumentParser {
+public:
+    static ParseResult parse(int argc, const char* const argv[]);
+    static std::string getRootHelp();
+    static std::string getSolveHelp();
+    static std::string getNlpHelp();
+    static bool isNlpPath(const std::string& path);
+    static bool isValidSolverName(const std::string& name);
+
+private:
+};
+
+}  // namespace cli
